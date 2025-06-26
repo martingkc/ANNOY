@@ -3,24 +3,39 @@
 #include <math.h>
 #define K 10
 
-struct Node
+typedef struct  Node
 { 
 float** data; // list of vectors 
-int** size;
-struct node *left; 
-struct node *right;
-struct node *parent;
+int size;
+struct Node *left; 
+struct Node *right;
+struct Node *parent;
 float* normal; // normal vector for the sector 
 float indexedMedian; // decision val
-};
+}Node;
+
+typedef struct List{
+	float** data; 
+	int size;
+	struct List *next; 
+} List;
 
 int comp (const void * elem1, const void * elem2) 
 {
-    int f = *((int*)elem1);
-    int s = *((int*)elem2);
+    float f = *((float*)elem1);
+    float s = *((float*)elem2);
     if (f > s) return  1;
     if (f < s) return -1;
     return 0;
+}
+
+void deleteList(List *head) {
+    List *tmp;
+    while (head) {
+        tmp = head->next;
+        free(head);
+        head = tmp;
+    }
 }
 
 Node* createNode(float** data, int size)
@@ -32,6 +47,35 @@ Node* createNode(float** data, int size)
     newNode->right = NULL;
     newNode->parent = NULL; 
     return newNode;
+}
+
+List* createListNode(float** data, int size)
+{
+    List* newList = (List*)malloc(sizeof(List));
+    newList->data = data;
+    newList->size = size;
+    newList->next = NULL;
+    return newList;
+}
+
+void pushToList(List* head,float** data, int size){
+	List *tmp;
+	List *newItem;
+	if(head->data == NULL || head->size == -1){
+		head->data = data;
+		head->size = size;
+	}else{
+		tmp = head;
+		newItem = createListNode(data, size);
+		while(tmp->next != NULL){
+			tmp = tmp->next;
+		}
+
+		tmp->next = newItem;
+		newItem->next = NULL;
+	}
+
+	return;
 }
  
 float dotProd(float* a, float* b, int size){
@@ -55,9 +99,11 @@ float computeProjection(float* normal, float* vector, int sizeVectors){
 	float factor; 
 	float tempRes; 
 	float result; 
+
+	result = 0;
 	
-	nDotv = dotProd(normal, vector);
-	nDotn = dotProd(normal, normal); 
+	nDotv = dotProd(normal, vector, sizeVectors);
+	nDotn = dotProd(normal, normal, sizeVectors); 
 
 	factor = nDotv / nDotn; 
 
@@ -132,7 +178,7 @@ void addSplit(Node* self, int dataSize){
 	projections = malloc(sizeof(float)*size);
 
 	if(projections == NULL){
-		return NULL;
+		return;
 	}
 
 	idxA = rand()%size;
@@ -171,7 +217,9 @@ void addSplit(Node* self, int dataSize){
 	dataR = malloc(sizeR * sizeof(float*));
 
 	if(dataL == NULL || dataR == NULL){
-		return NULL;
+		free(dataL);
+		free(dataR);
+		return;
 	}
 
 
@@ -193,7 +241,7 @@ void addSplit(Node* self, int dataSize){
 	self->right = createNode(dataR, sizeR);
 
 	if(self->left == NULL || self->right == NULL){
-		return NULL; 
+		return; 
 	}
 
 	self->right->parent = self;
@@ -212,6 +260,7 @@ void addSplit(Node* self, int dataSize){
 	// Nodes that aren't leafs don't get the size or data fields filled. 
 	
 	free(self->data);
+	free(projections);
 
 	self->data = NULL;
 	self->size = -1;
@@ -232,7 +281,7 @@ void addVector(Node* self, float* vector, int dataSize){
 		}
 	}else{
 		tmpData = malloc((self->size+1)*sizeof(float*)); 
-		if(tmpData == NULL) return NULL;
+		if(tmpData == NULL) return;
 		for(int i = 0; i<(self->size + 1); i++){
 			if(i !=(self->size)){
 				tmpData[i] = self->data[i];
@@ -265,18 +314,91 @@ possible solutions:
 	- go to the adjacent (topK/K) * 2 nodes then gather them to calculate cosine or eucledian similarity. 
 	- for now i've included parent node pointer in the node def. I should try also adding a trasverse stack to see if it performs better 	
 */
-float** search(Node* self, float* vector, int topK, int dataSize){
 
+Node* recursiveNodeSearch(Node* self, float* vector, int dataSize){
+	float** tmpData; 
+	float projection;
+
+	// this would be better with a check on the leafs 
 	if(self->data == NULL){
 		projection = computeProjection(self->normal, vector, dataSize);
 		if (projection > self->indexedMedian){
-			search(self->right, vector,topK, dataSize);
+			return recursiveNodeSearch(self->right, vector, dataSize);
 		}else{
-			search(self->left, vector, topK, dataSize);			
+			return recursiveNodeSearch(self->left, vector, dataSize);		
 		}
 	}else{
-
+		return self; 
 	}
+}
+
+
+void collectLevel(Node* self, List* head){
+	if(self->data == NULL){
+		 collectLevel(self->right, head);
+		 collectLevel(self->left, head);		
+	}else{
+		pushToList(head, self->data,self->size);
+	}
+}
+
+float** getVectorsList(List* head, int dataSize, int *retSize) {
+    List* tmp;
+    float **vectors;
+    int totSize;
+    int pos;
+    int i;
+
+    totSize = 0;
+    tmp = head;
+    while (tmp) {
+        totSize += tmp->size;
+        tmp = tmp->next;
+    }
+
+    vectors = malloc(totSize * sizeof(*vectors));
+    if (vectors == NULL) {
+        return NULL;
+    }
+
+    tmp = head;
+    pos = 0;
+    while (tmp) {
+        for (i = 0; i < tmp->size; i++) {
+            vectors[pos++] = tmp->data[i];
+        }
+        tmp = tmp->next;
+    }
+
+    *retSize = totSize; 
+
+    return vectors;
+}
+
+float** searchTopK(Node* self, float* vector, int topK, int dataSize, int *size){
+	List* head; // list of vectors holding the results 
+
+	Node* startNode; // starting node from which to start trasversing
+	float** vectors;
+	int nodesToFind; 
+	head = createListNode(NULL, -1); 
+
+	startNode = recursiveNodeSearch(self, vector, dataSize); 
+	nodesToFind = (int)sqrt((topK/(float)K)*1.25f) + 1;
+
+	if (startNode->parent == NULL) return NULL;
+
+	do{
+		startNode = startNode->parent; 
+		nodesToFind -= 1;
+	}while(nodesToFind>=0 && startNode->parent != NULL);
+
+	collectLevel(startNode, head);
+
+	deleteList(head); 
+
+	return getVectorsList(head, dataSize, size);
+
 }
 
 
