@@ -20,6 +20,19 @@ typedef struct List{
 	struct List *next; 
 } List;
 
+typedef struct Pair{
+	float key; 
+	float* value;
+}Pair;
+
+int compPairs(const void * p1, const void * p2){
+	const Pair *x = p1;
+    const Pair *y = p2;
+    if (x->key < y->key) return  1;
+    if (x->key > y->key) return -1;
+    return 0;
+}
+
 int comp (const void * elem1, const void * elem2) 
 {
     float f = *((float*)elem1);
@@ -28,6 +41,7 @@ int comp (const void * elem1, const void * elem2)
     if (f < s) return -1;
     return 0;
 }
+
 
 void deleteList(List *head) {
     List *tmp;
@@ -116,6 +130,29 @@ float computeProjection(float* normal, float* vector, int sizeVectors){
 
 }
 
+
+float cosineSimilarity(float* a, float* b, int dataSize){
+	float aDotb; 
+	float aNormal; 
+	float bNormal; 
+
+	aNormal = 0; 
+	bNormal = 0;
+	
+	for(int i = 0 ; i<dataSize; i++){
+		aNormal += a[i] * a[i]; 
+		bNormal += b[i] * b[i]; 
+	}
+
+	aNormal = (float)sqrt(aNormal); 
+	bNormal = (float)sqrt(bNormal);
+
+	aDotb = dotProd(a,b, dataSize);
+
+	return aDotb/(aNormal+bNormal);
+
+
+}
 
 float* determineNormal(float *a, float *b, int size){
 	float* normal;
@@ -375,11 +412,25 @@ float** getVectorsList(List* head, int dataSize, int *retSize) {
     return vectors;
 }
 
-float** searchTopK(Node* self, float* vector, int topK, int dataSize, int *size){
-	List* head; // list of vectors holding the results 
+Pair* searchTopK(Node* self, float* vector, int topK, int dataSize, int *size){
+	/** 
+	 * Node self -> head of the ANN tree 
+	 * float* vector -> vector to do similarity search
+	 * int topK -> num of results to fetch 
+	 * int dataSize -> size of vectors
+	 * int *size -> variable where the size of the return vector gets written tbh its unnecessary since topK is set but still havent added a delimiter and its not a given that there will be topK results maybe we can add dummy data or NULL vals to the list to complete it. 
+	 * 
+	 * 
+	 * TODOS: 
+	 * 	1 - Check the mem allocation I think there might be a mem leak somewhere 
+	 *  2 - Add an enum as an input so that you can choose the similarity function to use. 
+	 */
 
+	List* head; // list of vectors holding the results 
 	Node* startNode; // starting node from which to start trasversing
 	float** vectors;
+	float* similarity; 
+	Pair *arr; // a map style return type key = simScore // value = vector returns ordered 
 	int nodesToFind; 
 	head = createListNode(NULL, -1); 
 
@@ -397,10 +448,112 @@ float** searchTopK(Node* self, float* vector, int topK, int dataSize, int *size)
 
 	deleteList(head); 
 
-	return getVectorsList(head, dataSize, size);
+	vectors = getVectorsList(head, dataSize, size);
+	similarity = malloc(sizeof(float) * (*size)); 
+	arr = malloc(sizeof(Pair) * (*size));
 
+
+	if(similarity == NULL||arr == NULL) return NULL;
+
+	for(int i = 0; i< (*size); i++){
+		similarity[i] = cosineSimilarity(vectors, vector, dataSize);
+	}
+
+	for(int i = 0; i< (*size); i++){
+		arr[i].key = similarity[i];
+		arr[i].value = vectors[i];
+	}
+
+	qsort(arr, *(size), sizeof *arr, compPairs);
+
+	return arr;
 }
 
+
+
+void serializeTree(Node* node, FILE* out, int dataSize) {
+    if (!node) {
+        unsigned char tag = 0;
+        fwrite(&tag, 1, 1, out);
+        return;
+    }
+
+    if (node->data == NULL) {
+        // internal node
+        unsigned char tag = 1;
+        fwrite(&tag, 1, 1, out);
+        // write median
+        fwrite(&node->indexedMedian, sizeof node->indexedMedian, 1, out);
+        // write normal vector
+        fwrite(node->normal, sizeof *node->normal, dataSize, out);
+    } else {
+        // leaf
+        unsigned char tag = 2;
+        fwrite(&tag, 1, 1, out);
+        // write count
+        fwrite(&node->size, sizeof node->size, 1, out);
+        // write each vector
+        for (int i = 0; i < node->size; i++) {
+            fwrite(node->data[i], sizeof *node->data[i], dataSize, out);
+        }
+    }
+    // recurse
+    serializeTree(node->left,  out, dataSize);
+    serializeTree(node->right, out, dataSize);
+}
+
+Node* deserializeTree(FILE* in, int dataSize) {
+    unsigned char tag;
+    if (fread(&tag, 1, 1, in) != 1) return NULL;  
+
+    if (tag == 0) {
+        return NULL;
+    }
+
+    Node* node = malloc(sizeof *node);
+    node->left = node->right = node->parent = NULL;
+    node->data = NULL;
+    node->normal = NULL;
+    node->size = -1;
+
+    if (tag == 1) {
+        // internal
+        fread(&node->indexedMedian, sizeof node->indexedMedian, 1, in);
+        node->normal = malloc(sizeof *node->normal * dataSize);
+        fread(node->normal, sizeof *node->normal, dataSize, in);
+        // children
+        node->left  = deserializeTree(in, dataSize);
+        node->right = deserializeTree(in, dataSize);
+        if (node->left)  node->left->parent  = node;
+        if (node->right) node->right->parent = node;
+    } else {
+        // leaf
+        fread(&node->size, sizeof node->size, 1, in);
+        node->data = malloc(sizeof *node->data * node->size);
+        for (int i = 0; i < node->size; i++) {
+            node->data[i] = malloc(sizeof *node->data[i] * dataSize);
+            fread(node->data[i], sizeof *node->data[i], dataSize, in);
+        }
+        // leaves have no children
+    }
+
+    return node;
+}
+
+void saveTree(Node* root, const char *path, int dataSize) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror("fopen"); return; }
+    serializeTree(root, f, dataSize);
+    fclose(f);
+}
+
+Node* loadTree(const char *path, int dataSize) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror("fopen"); return NULL; }
+    Node *root = deserializeTree(f, dataSize);
+    fclose(f);
+    return root;
+}
 
 
 
