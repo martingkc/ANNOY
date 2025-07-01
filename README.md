@@ -1,10 +1,17 @@
-# An implementation of ANNOY (Aproximate Nearest Neighbor Oh Yeah) in C 
-### !! WIP - still not functional: 
-### TODOS: 
--  ADD search
--  Try traverse stacking instead of Parent node pointer.
--  Add binary serialization and deserialization
+# ANNOY-C
+*A C implementation of Spotify’s “Approximate Nearest Neighbor Oh Yeah” (Annoy) algorithm, with plans for Python bindings.*
+
+---
+
+## Features
+
+| Status | Feature |
+|--------|---------|
+| OK | Build-time KD-tree-style index with random hyperplane splits |
+| OK | Cosine-similarity search (`searchTopK`) |
+| OK | Binary serialization / deserialization of the tree |
+| WIP | Python C-extension wrapper (planned) |
+| WIP | SQLite metadata store (`uuid → JSON`) |
+| WIP | Additional distance metrics (Euclidean, dot-product, …) |
 
 
-### REF: 
-- [Explanation of the Algorithm by the Spotify Engineer that created it](https://erikbern.com/2015/10/01/nearest-neighbors-and-vector-models-part-2-how-to-search-in-high-dimensional-spaces.html)
