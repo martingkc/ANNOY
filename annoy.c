@@ -376,18 +376,6 @@ void addVector(Node *self, float *vector, int dataSize) {
     }
 }
 
-/*
-Add serialization and deserialization for the tree.
-Add search
-*/
-
-/*
-go to the leaf that you belong then traverse the adjacent leafs until you reach topK dataPoints
-
-possible solutions:
-	- go to the adjacent (topK/K) * 2 nodes then gather them to calculate cosine or eucledian similarity.
-	- for now i've included parent node pointer in the node def. I should try also adding a trasverse stack to see if it performs better
-*/
 
 Node *recursiveNodeSearch(Node *self, float *vector, int dataSize) {
     if (!self) return NULL;
@@ -459,11 +447,6 @@ ScorePair *searchTopK(Node *self, float *vector, int topK, int dataSize, int *si
      * int topK -> num of results to fetch
      * int dataSize -> size of vectors
      * int *size -> variable where the size of the return vector gets written tbh its unnecessary since topK is set but still havent added a delimiter and its not a given that there will be topK results maybe we can add dummy data or NULL vals to the list to complete it.
-     *
-     *
-     * TODOS:
-     * 	1 - Check the mem allocation I think there might be a mem leak somewhere
-     *  2 - Add an enum as an input so that you can choose the similarity function to use.
      */
 
     List *head; // list of vectors holding the results
@@ -480,7 +463,7 @@ ScorePair *searchTopK(Node *self, float *vector, int topK, int dataSize, int *si
         *size = 0;
         return NULL;
     }
-    nodesToFind = (int) sqrt((topK * 2 / (float) K) * 1.25f) + 2;
+    nodesToFind = (int) sqrt((topK * 2 / (float) K) * 1.25f) + 2; // Here we define how many parent nodes to go up to be able to find topK vectors. Its a bit excessive ik. 
 
     if (startNode->parent == NULL)
         return NULL;
@@ -679,7 +662,6 @@ int main(int argc, char **argv) {
      * 2. add sqlite to store vector uuid, vector and metadata.
      * 3. add CRUD methods for metadata and vectors.
      * 4. add other similarity functions.
-     * 5. define python and dart wrappers.
      */
 
     if (argc != 2) {
