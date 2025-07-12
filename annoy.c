@@ -392,29 +392,29 @@ possible solutions:
 Node *recursiveNodeSearch(Node *self, float *vector, int dataSize) {
     if (!self) return NULL;
 
-    /* internal node → decide which branch to follow */
+    // Internal Node
     if (self->data == NULL) {
         float proj = computeProjection(self->normal, vector, dataSize);
         Node *next = (proj > self->indexedMedian) ? self->right : self->left;
 
-        /* If that branch is missing, treat *this* internal node as the leaf. */
+       
         return next ? recursiveNodeSearch(next, vector, dataSize) : self;
     }
 
-    /* leaf node */
+    // Leaf Node
     return self;
 }
 
 void collectLevel(Node *self, List *head) {
-    if (self == NULL) /* <- NEW: safe-guard against NULL child   */
+    if (self == NULL) 
         return;
 
     if (self->data == NULL) {
-        /* internal node – recurse on children     */
+        // Internal Node
         collectLevel(self->right, head);
         collectLevel(self->left, head);
     } else {
-        /* leaf – add its vectors to the list      */
+        // Leaf
         pushToList(head, self->data, self->size);
     }
 }
