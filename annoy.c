@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
+#include <sqlite3.h>
+
 
 
 #define K 16
@@ -285,8 +287,6 @@ void addSplit(Node *self, int dataSize) {
     sizeR = size - cnt;
 
     if (sizeL == 0 || sizeR == 0) {
-        free(dataL);
-        free(dataR);
         free(projections);
         return;
     }
@@ -376,10 +376,33 @@ void addVector(Node *self, float *vector, int dataSize) {
     }
 }
 
-/*
-Add serialization and deserialization for the tree.
-Add search
-*/
+// Like addVector but takes a pre-created VectorPair so the caller knows the UUID upfront.
+void addVectorPair(Node *self, VectorPair *vp, int dataSize) {
+    VectorPair **tmpData;
+    float projection;
+
+    if (self->data == NULL) {
+        projection = computeProjection(self->normal, vp->value, dataSize);
+        if (projection > self->indexedMedian) {
+            addVectorPair(self->right, vp, dataSize);
+        } else {
+            addVectorPair(self->left, vp, dataSize);
+        }
+    } else {
+        tmpData = malloc((self->size + 1) * sizeof(VectorPair *));
+        if (tmpData == NULL) return;
+        for (int i = 0; i < self->size; i++) {
+            tmpData[i] = self->data[i];
+        }
+        tmpData[self->size] = vp;
+        free(self->data);
+        self->data = tmpData;
+        self->size++;
+        if (self->size > K) {
+            addSplit(self, dataSize);
+        }
+    }
+}
 
 /*
 go to the leaf that you belong then traverse the adjacent leafs until you reach topK dataPoints
@@ -406,7 +429,7 @@ Node *recursiveNodeSearch(Node *self, float *vector, int dataSize) {
 }
 
 void collectLevel(Node *self, List *head) {
-    if (self == NULL) /* <- NEW: safe-guard against NULL child   */
+    if (self == NULL)
         return;
 
     if (self->data == NULL) {
@@ -453,19 +476,6 @@ VectorPair **getVectorsList(List *head, int dataSize, int *retSize) {
 }
 
 ScorePair *searchTopK(Node *self, float *vector, int topK, int dataSize, int *size) {
-    /**
-     * Node self -> head of the ANN tree
-     * float* vector -> vector to do similarity search
-     * int topK -> num of results to fetch
-     * int dataSize -> size of vectors
-     * int *size -> variable where the size of the return vector gets written tbh its unnecessary since topK is set but still havent added a delimiter and its not a given that there will be topK results maybe we can add dummy data or NULL vals to the list to complete it.
-     *
-     *
-     * TODOS:
-     * 	1 - Check the mem allocation I think there might be a mem leak somewhere
-     *  2 - Add an enum as an input so that you can choose the similarity function to use.
-     */
-
     List *head; // list of vectors holding the results
     Node *startNode; // starting node from which to start trasversing
     VectorPair **vectors;
@@ -662,71 +672,172 @@ Node *loadTree(const char *path, int dataSize) {
     return root;
 }
 
-int main(int argc, char **argv) {
-    /**
-     * `--create [db name] -f [file path] -s [size of vectors] -m [metadata in json]` creates vectordb named db name and uses the file containing the vectors on file path
-     * `--load [db name]` loads db with db name
-     * `--save [db name]` saves current db
-     * `--search [db name] -v [vector path or vector] -k [num of neighbors] [opt] -similarity "cosine"||"eucledian"` sear
-     * `--add [db name] -v [vector path or vector] -m [metadata in json]
-     *
-     * NOTES:
-     * 1 - Serialization and Deserialization dont work
-     *
-     *
-     * TODO:
-     * 1. add collection metadata serialization ie metadata fields, datasize, collection name, paths, user defined constraints.
-     * 2. add sqlite to store vector uuid, vector and metadata.
-     * 3. add CRUD methods for metadata and vectors.
-     * 4. add other similarity functions.
-     * 5. define python and dart wrappers.
-     */
+// ============================================================
+// SQLite metadata layer
+// ============================================================
 
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <datafile>\n", argv[0]);
+static char *buildPath(const char *name, const char *ext) {
+    size_t len = strlen(name) + strlen(ext) + 1;
+    char *path = malloc(len);
+    if (path) snprintf(path, len, "%s%s", name, ext);
+    return path;
+}
+
+sqlite3 *openMetadataDB(const char *collection_name) {
+    char *path = buildPath(collection_name, ".db");
+    if (!path) return NULL;
+
+    sqlite3 *db;
+    if (sqlite3_open(path, &db) != SQLITE_OK) {
+        fprintf(stderr, "Cannot open DB %s: %s\n", path, sqlite3_errmsg(db));
+        sqlite3_close(db);
+        free(path);
+        return NULL;
+    }
+    free(path);
+    return db;
+}
+
+void closeMetadataDB(sqlite3 *db) {
+    if (db) sqlite3_close(db);
+}
+
+int initCollectionDB(sqlite3 *db, const char *name, int dataSize) {
+    const char *sql =
+        "CREATE TABLE IF NOT EXISTS collection_info ("
+        "  key   TEXT PRIMARY KEY,"
+        "  value TEXT NOT NULL"
+        ");"
+        "CREATE TABLE IF NOT EXISTS vectors ("
+        "  uuid     TEXT PRIMARY KEY,"
+        "  metadata TEXT"
+        ");";
+
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        fprintf(stderr, "SQL error (init): %s\n", err);
+        sqlite3_free(err);
         return -1;
     }
-    const char *path = argv[1];
+
+    const char *infoSql =
+        "INSERT OR REPLACE INTO collection_info (key, value) VALUES (?, ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, infoSql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    sqlite3_bind_text(stmt, 1, "name", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_reset(stmt);
+
+    char sizeStr[32];
+    snprintf(sizeStr, sizeof(sizeStr), "%d", dataSize);
+    sqlite3_bind_text(stmt, 1, "data_size", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, sizeStr, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
+int getCollectionDataSize(sqlite3 *db, int *dataSize) {
+    const char *sql = "SELECT value FROM collection_info WHERE key = 'data_size';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    int rc = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        *dataSize = atoi((const char *) sqlite3_column_text(stmt, 0));
+        rc = 0;
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int insertMetadata(sqlite3 *db, const char *uuid, const char *metadata_json) {
+    const char *sql =
+        "INSERT OR REPLACE INTO vectors (uuid, metadata) VALUES (?, ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    sqlite3_bind_text(stmt, 1, uuid, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, metadata_json ? metadata_json : "null",
+                     -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+// Returns a malloc'd string; caller must free. Returns NULL if not found.
+char *getMetadata(sqlite3 *db, const char *uuid) {
+    const char *sql = "SELECT metadata FROM vectors WHERE uuid = ?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+
+    sqlite3_bind_text(stmt, 1, uuid, -1, SQLITE_STATIC);
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *text = (const char *) sqlite3_column_text(stmt, 0);
+        if (text) result = strdup(text);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+int deleteMetadata(sqlite3 *db, const char *uuid) {
+    const char *sql = "DELETE FROM vectors WHERE uuid = ?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    sqlite3_bind_text(stmt, 1, uuid, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int updateMetadata(sqlite3 *db, const char *uuid, const char *metadata_json) {
+    const char *sql = "UPDATE vectors SET metadata = ? WHERE uuid = ?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    sqlite3_bind_text(stmt, 1, metadata_json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, uuid, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+// ============================================================
+// File helpers
+// ============================================================
+
+// Reads space/newline separated floats; one vector per line.
+static float **readVectorsFromFile(const char *path, int dataSize, long *outCount) {
     FILE *fp = fopen(path, "r");
-    if (fp == NULL) {
-        perror("fopen");
-        return -1;
-    }
+    if (!fp) { perror("fopen"); return NULL; }
 
     long count = 0;
     int ch;
     while ((ch = fgetc(fp)) != EOF) {
-        if (ch == '\n') {
-            count++;
-        }
+        if (ch == '\n') count++;
     }
-    if (ferror(fp)) {
-        perror("reading for line count");
-        fclose(fp);
-        return -1;
-    }
+    if (count == 0) { fclose(fp); *outCount = 0; return NULL; }
+    rewind(fp);
 
-    const int DATASIZE = 512;
     float **vectors = malloc(sizeof *vectors * count);
-    if (vectors == NULL) {
-        perror("malloc vectors array");
-        fclose(fp);
-        return -1;
-    }
+    if (!vectors) { fclose(fp); return NULL; }
 
     for (long j = 0; j < count; j++) {
-        vectors[j] = malloc(sizeof *vectors[j] * DATASIZE);
-        if (vectors[j] == NULL) {
-            perror("malloc vectors[j]");
+        vectors[j] = malloc(sizeof(float) * dataSize);
+        if (!vectors[j]) {
             while (j-- > 0) free(vectors[j]);
             free(vectors);
             fclose(fp);
-            return -1;
+            return NULL;
         }
     }
 
-    rewind(fp);
-    char token[DATASIZE];
+    char token[64];
     int pos = 0;
     long i = 0, j = 0;
     while ((ch = fgetc(fp)) != EOF && j < count) {
@@ -735,92 +846,312 @@ int main(int argc, char **argv) {
                 token[pos] = '\0';
                 char *endptr;
                 float val = strtof(token, &endptr);
-                if (*endptr == '\0') {
-                    if (i >= DATASIZE) {
-                        fprintf(stderr, "ERROR: vector %ld too many elements\n", j);
-                        for (long idx = 0; idx < count; idx++) {
-                            free(vectors[idx]);
-                        }
-                        free(vectors);
-                    }
+                if (*endptr == '\0' && i < dataSize) {
                     vectors[j][i++] = val;
                 }
                 pos = 0;
             }
-            if (ch == '\n') {
-                j++;
-                i = 0;
-            }
-        } else if (pos < DATASIZE - 1) {
+            if (ch == '\n') { j++; i = 0; }
+        } else if (pos < (int) sizeof(token) - 1) {
             token[pos++] = ch;
         }
     }
-
-    if (ferror(fp)) {
-        perror("parsing floats");
-        for (long idx = 0; idx < count; idx++) {
-            free(vectors[idx]);
-        }
-        free(vectors);
-    }
     fclose(fp);
 
-    VectorPair **values = malloc(sizeof *values * count);
-    if (values == NULL) {
-        perror("malloc values");
-        for (long idx = 0; idx < count; idx++) {
-            free(vectors[idx]);
-        }
-        free(vectors);
+    *outCount = count;
+    return vectors;
+}
+
+// Reads one JSON metadata string per line (matches vector file line-for-line).
+static char **readMetadataFromFile(const char *path, long count) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) { perror("fopen"); return NULL; }
+
+    char **metadata = calloc(count, sizeof(char *));
+    if (!metadata) { fclose(fp); return NULL; }
+
+    char line[4096];
+    long i = 0;
+    while (i < count && fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+        metadata[i++] = strdup(line);
     }
-    for (long idx = 0; idx < count; idx++) {
-        values[idx] = createVectorPair(vectors[idx]);
-    }
+    fclose(fp);
+    return metadata;
+}
 
-
-    Node *head = createNode(values, (int) count);
-    if (head == NULL) {
-        fprintf(stderr, "Failed to create root node\n");
-        free(values);
-        for (long idx = 0; idx < count; idx++) {
-            free(vectors[idx]);
-        }
-        free(vectors);
-    }
-
-    addSplit(head, DATASIZE);
-    saveTree(head, "tree.bin", DATASIZE);
-    ScorePair *results, *resultsLoad;
-    int size;
-    results = searchTopK(head, vectors[0], 10, DATASIZE, &size);
-    for (int i = 0; i < size; i++) {
-        printf("%s\n", results[i].uuid);
-    }
-    freeTree(head, DATASIZE);
-
-    head = loadTree("tree.bin", DATASIZE);
-    resultsLoad = searchTopK(head, vectors[0], 10, DATASIZE, &size);
-    for (int i = 0; i < size; i++) {
-        int same = (strcmp(resultsLoad[i].uuid,
-                           results[i].uuid) == 0);
-        printf("loaded[%d]=%s  original[%d]=%s  same=%d\n",
-               i, resultsLoad[i].uuid,
-               i, results[i].uuid,
-               same);
-    }
-
-    free(resultsLoad);
-    freeTree(head, DATASIZE);
-
-    free(results);
-
-
-
-    for (long idx = 0; idx < count; idx++) {
-        free(vectors[idx]);
-    }
+static void freeVectors(float **vectors, long count) {
+    for (long i = 0; i < count; i++) free(vectors[i]);
     free(vectors);
+}
 
-    printf("Processed %ld vectors (lines).\n", count);
-    return 0;
+static void freeMetadata(char **metadata, long count) {
+    if (!metadata) return;
+    for (long i = 0; i < count; i++) free(metadata[i]);
+    free(metadata);
+}
+
+// ============================================================
+// CLI entry point
+// ============================================================
+
+int main(int argc, char **argv) {
+    /*
+     * --create <collection> <vector_file> <metadata_file> -d <dim>
+     *     Build a new ANN index from vector_file.  One JSON string per line
+     *     in metadata_file is stored in SQLite keyed by vector UUID.
+     *
+     * --search <collection> <vector_file> -k <topK>
+     *     Load index, run ANN search with the first vector in vector_file,
+     *     and print results with their metadata.
+     *
+     * --add <collection> <vector_file> -m <metadata_file>
+     *     Insert new vectors (with metadata) into an existing collection.
+     *
+     * --remove <collection> <uuid>
+     *     Delete a vector's metadata entry from the DB by UUID.
+     *
+     * --update <collection> <uuid> <metadata_json>
+     *     Replace the metadata for an existing UUID.
+     */
+
+    if (argc < 2) {
+        fprintf(stderr,
+                "Usage:\n"
+                "  --create <collection> <vector_file> <metadata_file> -d <dim>\n"
+                "  --search <collection> <vector_file> -k <topK>\n"
+                "  --add    <collection> <vector_file> -m <metadata_file>\n"
+                "  --remove <collection> <uuid>\n"
+                "  --update <collection> <uuid> <metadata_json>\n");
+        return 1;
+    }
+
+    // --create <collection> <vector_file> <metadata_file> -d <dim>
+    if (strcmp(argv[1], "--create") == 0) {
+        if (argc != 7 || strcmp(argv[5], "-d") != 0) {
+            fprintf(stderr,
+                    "Usage: --create <collection> <vector_file> <metadata_file> -d <dim>\n");
+            return 1;
+        }
+        const char *collection = argv[2];
+        const char *vecFile    = argv[3];
+        const char *metaFile   = argv[4];
+        int dataSize = atoi(argv[6]);
+        if (dataSize <= 0) { fprintf(stderr, "Invalid dim\n"); return 1; }
+
+        long count = 0;
+        float **vectors = readVectorsFromFile(vecFile, dataSize, &count);
+        if (!vectors) return 1;
+
+        char **metadata = readMetadataFromFile(metaFile, count);
+
+        VectorPair **values = malloc(sizeof *values * count);
+        if (!values) {
+            freeMetadata(metadata, count);
+            freeVectors(vectors, count);
+            return 1;
+        }
+        for (long idx = 0; idx < count; idx++) {
+            values[idx] = createVectorPair(vectors[idx]);
+        }
+
+        sqlite3 *db = openMetadataDB(collection);
+        if (!db || initCollectionDB(db, collection, dataSize) != 0) {
+            free(values);
+            freeMetadata(metadata, count);
+            freeVectors(vectors, count);
+            return 1;
+        }
+
+        // Insert metadata before addSplit (addSplit frees the values[] array on root).
+        sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
+        for (long idx = 0; idx < count; idx++) {
+            const char *meta = (metadata && metadata[idx]) ? metadata[idx] : "null";
+            insertMetadata(db, values[idx]->uuid, meta);
+        }
+        sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+
+        Node *root = createNode(values, (int) count);
+        if (!root) {
+            closeMetadataDB(db);
+            freeMetadata(metadata, count);
+            freeVectors(vectors, count);
+            return 1;
+        }
+        addSplit(root, dataSize);
+
+        char *tp = buildPath(collection, ".bin");
+        saveTree(root, tp, dataSize);
+        free(tp);
+
+        freeTree(root, dataSize);
+        closeMetadataDB(db);
+        freeMetadata(metadata, count);
+        freeVectors(vectors, count);
+
+        printf("Created collection '%s' with %ld vectors (dim=%d).\n",
+               collection, count, dataSize);
+        return 0;
+    }
+
+    // --search <collection> <vector_file> -k <topK>
+    if (strcmp(argv[1], "--search") == 0) {
+        if (argc != 6 || strcmp(argv[4], "-k") != 0) {
+            fprintf(stderr, "Usage: --search <collection> <vector_file> -k <topK>\n");
+            return 1;
+        }
+        const char *collection = argv[2];
+        const char *vecFile    = argv[3];
+        int topK = atoi(argv[5]);
+        if (topK <= 0) { fprintf(stderr, "Invalid topK\n"); return 1; }
+
+        sqlite3 *db = openMetadataDB(collection);
+        if (!db) return 1;
+
+        int dataSize = 0;
+        if (getCollectionDataSize(db, &dataSize) != 0) {
+            fprintf(stderr, "Cannot read collection info\n");
+            closeMetadataDB(db);
+            return 1;
+        }
+
+        long count = 0;
+        float **vectors = readVectorsFromFile(vecFile, dataSize, &count);
+        if (!vectors || count == 0) { closeMetadataDB(db); return 1; }
+
+        char *tp = buildPath(collection, ".bin");
+        Node *root = loadTree(tp, dataSize);
+        free(tp);
+        if (!root) {
+            closeMetadataDB(db);
+            freeVectors(vectors, count);
+            return 1;
+        }
+
+        int size = 0;
+        ScorePair *results = searchTopK(root, vectors[0], topK, dataSize, &size);
+
+        for (int i = 0; i < size; i++) {
+            char *meta = getMetadata(db, results[i].uuid);
+            printf("[%d] uuid=%s  score=%.4f  metadata=%s\n",
+                   i + 1, results[i].uuid, results[i].key,
+                   meta ? meta : "null");
+            free(meta);
+        }
+
+        free(results);
+        freeTree(root, dataSize);
+        closeMetadataDB(db);
+        freeVectors(vectors, count);
+        return 0;
+    }
+
+    // --add <collection> <vector_file> -m <metadata_file>
+    if (strcmp(argv[1], "--add") == 0) {
+        if (argc != 6 || strcmp(argv[4], "-m") != 0) {
+            fprintf(stderr, "Usage: --add <collection> <vector_file> -m <metadata_file>\n");
+            return 1;
+        }
+        const char *collection = argv[2];
+        const char *vecFile    = argv[3];
+        const char *metaFile   = argv[5];
+
+        sqlite3 *db = openMetadataDB(collection);
+        if (!db) return 1;
+
+        int dataSize = 0;
+        if (getCollectionDataSize(db, &dataSize) != 0) {
+            fprintf(stderr, "Cannot read collection info\n");
+            closeMetadataDB(db);
+            return 1;
+        }
+
+        long count = 0;
+        float **vectors = readVectorsFromFile(vecFile, dataSize, &count);
+        if (!vectors) { closeMetadataDB(db); return 1; }
+
+        char **metadata = readMetadataFromFile(metaFile, count);
+
+        char *tp = buildPath(collection, ".bin");
+        Node *root = loadTree(tp, dataSize);
+        if (!root) {
+            free(tp);
+            closeMetadataDB(db);
+            freeMetadata(metadata, count);
+            freeVectors(vectors, count);
+            return 1;
+        }
+
+        sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
+        for (long idx = 0; idx < count; idx++) {
+            VectorPair *vp = createVectorPair(vectors[idx]);
+            if (!vp) continue;
+            const char *meta = (metadata && metadata[idx]) ? metadata[idx] : "null";
+            insertMetadata(db, vp->uuid, meta);
+            addVectorPair(root, vp, dataSize);
+        }
+        sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+
+        saveTree(root, tp, dataSize);
+        free(tp);
+
+        freeTree(root, dataSize);
+        closeMetadataDB(db);
+        freeMetadata(metadata, count);
+        freeVectors(vectors, count);
+
+        printf("Added %ld vector(s) to '%s'.\n", count, collection);
+        return 0;
+    }
+
+    // --remove <collection> <uuid>
+    if (strcmp(argv[1], "--remove") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: --remove <collection> <uuid>\n");
+            return 1;
+        }
+        const char *collection = argv[2];
+        const char *uuid       = argv[3];
+
+        sqlite3 *db = openMetadataDB(collection);
+        if (!db) return 1;
+
+        if (deleteMetadata(db, uuid) == 0) {
+            printf("Removed UUID %s from '%s'.\n", uuid, collection);
+        } else {
+            fprintf(stderr, "Failed to remove UUID %s\n", uuid);
+            closeMetadataDB(db);
+            return 1;
+        }
+        closeMetadataDB(db);
+        return 0;
+    }
+
+    // --update <collection> <uuid> <metadata_json>
+    if (strcmp(argv[1], "--update") == 0) {
+        if (argc != 5) {
+            fprintf(stderr, "Usage: --update <collection> <uuid> <metadata_json>\n");
+            return 1;
+        }
+        const char *collection    = argv[2];
+        const char *uuid          = argv[3];
+        const char *metadata_json = argv[4];
+
+        sqlite3 *db = openMetadataDB(collection);
+        if (!db) return 1;
+
+        if (updateMetadata(db, uuid, metadata_json) == 0) {
+            printf("Updated metadata for UUID %s in '%s'.\n", uuid, collection);
+        } else {
+            fprintf(stderr, "Failed to update UUID %s\n", uuid);
+            closeMetadataDB(db);
+            return 1;
+        }
+        closeMetadataDB(db);
+        return 0;
+    }
+
+    fprintf(stderr, "Unknown command: %s\n", argv[1]);
+    return 1;
 }

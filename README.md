@@ -1,9 +1,8 @@
 # An implementation of ANNOY (Aproximate Nearest Neighbor Oh Yeah) in C 
 ### !! WIP - still not functional: 
+Its shaping up to become a vector db. 
 ### TODOS: 
--  ADD search
 -  Try traverse stacking instead of Parent node pointer.
--  Add binary serialization and deserialization
 
 
 ### REF: 
