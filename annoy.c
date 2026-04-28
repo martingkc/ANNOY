@@ -415,16 +415,16 @@ possible solutions:
 Node *recursiveNodeSearch(Node *self, float *vector, int dataSize) {
     if (!self) return NULL;
 
-    /* internal node → decide which branch to follow */
+    // Internal Node
     if (self->data == NULL) {
         float proj = computeProjection(self->normal, vector, dataSize);
         Node *next = (proj > self->indexedMedian) ? self->right : self->left;
 
-        /* If that branch is missing, treat *this* internal node as the leaf. */
+       
         return next ? recursiveNodeSearch(next, vector, dataSize) : self;
     }
 
-    /* leaf node */
+    // Leaf Node
     return self;
 }
 
@@ -433,11 +433,11 @@ void collectLevel(Node *self, List *head) {
         return;
 
     if (self->data == NULL) {
-        /* internal node – recurse on children     */
+        // Internal Node
         collectLevel(self->right, head);
         collectLevel(self->left, head);
     } else {
-        /* leaf – add its vectors to the list      */
+        // Leaf
         pushToList(head, self->data, self->size);
     }
 }
@@ -490,7 +490,7 @@ ScorePair *searchTopK(Node *self, float *vector, int topK, int dataSize, int *si
         *size = 0;
         return NULL;
     }
-    nodesToFind = (int) sqrt((topK * 2 / (float) K) * 1.25f) + 2;
+    nodesToFind = (int) sqrt((topK * 2 / (float) K) * 1.25f) + 2; // Here we define how many parent nodes to go up to be able to find topK vectors. Its a bit excessive ik. 
 
     if (startNode->parent == NULL)
         return NULL;

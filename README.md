@@ -1,9 +1,22 @@
-# An implementation of ANNOY (Aproximate Nearest Neighbor Oh Yeah) in C 
-### !! WIP - still not functional: 
-Its shaping up to become a vector db. 
-### TODOS: 
--  Try traverse stacking instead of Parent node pointer.
+# ANNOY-C Vector Index
 
+A minimal C implementation of [ANNOY (Approximate Nearest Neighbors Oh Yeah)](https://github.com/spotify/annoy), the high-dimensional index behind Spotify’s music recommendations and other Vector DBs and Indexes.  
+This version builds a binary, on-disk tree of 512-dimensional vectors, supports fast cosine-similarity search, and can save/load the index to/from a file.
 
-### REF: 
-- [Explanation of the Algorithm by the Spotify Engineer that created it](https://erikbern.com/2015/10/01/nearest-neighbors-and-vector-models-part-2-how-to-search-in-high-dimensional-spaces.html)
+---
+
+## Features
+
+| Status | Feature |
+|--------|---------|
+| OK | Build-time KD-tree-style index with random hyperplane splits |
+| OK | Cosine-similarity search (`searchTopK`) |
+| OK | Binary serialization / deserialization of the tree |
+| WIP | Python C-extension wrapper (planned) |
+| WIP | SQLite metadata store (`uuid → JSON`) |
+| WIP | Additional distance metrics (Euclidean, dot-product, …) |
+| Maybe | Adding ACID compliancy (might be fun) | 
+
+## References 
+-  [Erik Bernhardsson, “Nearest neighbors and vector models, part 2”](https://erikbern.com/2015/10/01/nearest-neighbors-and-vector-models-part-2-how-to-search-in-high-dimensional-spaces.html)
+-  [ANNOY (Approximate Nearest Neighbors Oh Yeah)](https://github.com/spotify/annoy)
